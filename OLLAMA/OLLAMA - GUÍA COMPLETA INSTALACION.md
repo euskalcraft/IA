@@ -1,7 +1,7 @@
 ---
 tags: [homelab, ia, llm, ollama, linux, self-hosting]
 fecha: 2026-07-16
-servidor: "HL2-1 (192.168.1.126)"
+servidor: "HL2-1 (192.168.1.35)"
 hardware: "2x NVIDIA Tesla V100 16GB"
 os: "Ubuntu Server 24.04"
 ---
