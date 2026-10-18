@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Space Invaders</title>
+<style>
+html,body{margin:0;height:100%;background:#000;display:flex;align-items:center;justify-content:center}
+canvas{image-rendering:pixelated;background:#000}
+#wrap{text-align:center;color:#0f0;font-family:monospace}
+</style>
+</head>
+<body>
+<div id="wrap">
+<canvas id="c" width="224" height="256"></canvas>
+<p style="font-size:12px">← → mover · ESPACIO disparar · P pausa · M sonido</p>
+</div>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+const W=224,H=256,SCALE=Math.max(1,Math.floor(Math.min(innerWidth/W,innerHeight/H)));
+cv.style.width=W*SCALE+'px';cv.style.height=H*SCALE+'px';
+// ---- Sprites (bitmaps) ----
+function mkSpr(rows){const w=rows[0].length,h=rows.length,c=document.createElement('canvas');c.width=w;c.height=h;const g=c.getContext('2d'),im=g.createImageData(w,h);for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(rows[y][x]==='X'){const i=(y*w+x)*4;im.data[i]=im.data[i+1]=im.data[i+2]=255;im.data[i+3]=255;}g.putImageData(im,0,0);return c;}
+const SQUID_A=mkSpr(["...XX...","..XXXX..",".XXXXXX.","XXXXXXXX",".XXXXXX.","..X..X..","",""]),SQUID_B=mkSpr(["...XX...","..XXXX..",".XXXXXX.","XXXXXXXX",".XXXXXX.",".X....X."]);
+const CRAB_A=mkSpr(["...XX...XX.",".XXXXXXXXX.","XXXXXXXXXXX","XXXXXXXXXXX","X.XXXXXXX.X","","",""]);
+const CRAB_B=mkSpr(["...XX...XX.",".XXXXXXXXX.","XXXXXXXXXXX","XXXXXXXXXXX","..XXXXXXX..","","",""]);
+const OCTO_A=mkSpr(["...XXXXXX...",".XXXXXXXXXX.","XXXXXXXXXXXX","X.XXXXXXXX.X","XX.XXXXXX.XX","","",""]);
+const OCTO_B=mkSpr(["...XXXXXX...",".XXXXXXXXXX.","XXXXXXXXXXXX","X.XXXXXXXX.X",".XX.XX.XX..","","",""]);
+const UFO=mkSpr([".....XXXX......","....XXXXXX.....","...XXXXXXXX....",".XX.XXXXXXXX.XX"]);
+const CANNON=mkSpr([".......X.......","......XXX......",".....XXXXX.....","XXXXXXXXXXXXX","XXXXXXXXXXXXX","XXXXXXXXXXXXX","XXXXXXXXXXXXX","XXXXXXXXXXXXX"]);
+const PBUL=mkSpr(["XX","XX","XX","XX","XX","XX","XX"]),IBUL=mkSpr(["X.","..","X.","X.","..","X.","X.",".."]);
+// ---- Audio (Web Audio API) ----
+let ac=null,muted=false;
+function audio(){if(!ac){try{ac=new(window.AudioContext||window.webkitAudioContext)();}catch(e){}}if(ac&&ac.state==='suspended')ac.resume();return ac;}
+function tone(f0,f1,dur,type,vol){const a=audio();if(!a||muted)return;const o=a.createOscillator(),g=a.createGain();o.type=type;o.frequency.setValueAtTime(f0,a.currentTime);o.frequency.exponentialRampToValueAtTime(Math.max(20,f1),a.currentTime+dur);g.gain.setValueAtTime(vol,a.currentTime);g.gain.exponentialRampToValueAtTime(.001,a.currentTime+dur);o.connect(g).connect(a.destination);o.start();o.stop(a.currentTime+dur);}
+function noise(dur,vol){const a=audio();if(!a||muted)return;const n=Math.round(a.sampleRate*dur),b=a.createBuffer(1,n,a.sampleRate),d=b.getChannelData(0);for(let i=0;i<n;i++)d[i]=Math.random()*2-1;const s=a.createBufferSource(),g=a.createGain();s.buffer=b;g.gain.setValueAtTime(vol,a.currentTime);g.gain.exponentialRampToValueAtTime(.001,a.currentTime+dur);s.connect(g).connect(a.destination);s.start();}
+const snd={fire:()=>tone(900,200,.08,'square',.15),kill:()=>{noise(.15,.25);tone(300,60,.15,'sawtooth',.2);},ufoOn:()=>{const a=audio();if(!a||muted)return;snd._uo=a.createOscillator();snd._ug=a.createGain();snd._uo.type='square';snd._uo.frequency.value=800;const l=a.createOscillator(),lg=a.createGain();l.type='sine';l.frequency.value=16;lg.gain.value=300;l.connect(lg).connect(snd._uo.frequency);snd._ug.gain.value=.05;snd._uo.connect(snd._ug).connect(a.destination);snd._uo.start();l.start();snd._ll=l;},ufoOff:()=>{try{if(snd._uo){snd._uo.stop();snd._uo.disconnect();}if(snd._ll)snd._ll.stop();}catch(e){}},boom:()=>{noise(.4,.35);tone(200,30,.4,'sawtooth',.3);},step:n=>tone([65,55,78,49][n%4],[65,55,78,49][(n+1)%4],.09,'square',.12),over:()=>{tone(400,40,.8,'sawtooth',.25);}};
+// ---- Estado del juego ----
+let mode='title',score=0,lives=3,round=1,hiScore=+(localStorage.getItem('si_hi')||0);
+let inv=[],dir=1,stepT=0,animF=0,animT=0,pBul=null,iBuls=[],shootT=0;
+const player={x:W/2-6,y:238};
+const ufo={on:false,x:-20,dir:1,t:0,pts:50};
+let stepN=0,msgT=0,msg='';
+// ---- Bunkers (blindajes) ----
+const BW=26,BH=16,CELL=2;
+function bunkerGrid(){const g=[];for(let r=0;r<BH;r++){g[r]=[];for(let c=0;c<BW;c++){let on=false;if(r===0)on=c>=4&&c<=21;else if(r===1)on=c>=3&&c<=22;else if(r===2)on=c>=2&&c<=23;else if(r===3)on=c>=1&&c<=24;else on=r<12||(c<10||c>15);g[r][c]=on?1:0;}}return g;}
+let bunkers=[];
+function makeBunkers(){bunkers=[4,60,116,172].map(x=>({x,y:200,g:bunkerGrid()}));}
+function bunkerAt(px,py){for(const b of bunkers){const cx=Math.floor((px-b.x)/CELL),cy=Math.floor((py-b.y)/CELL);if(cx>=0&&cx<BW&&cy>=0&&cy<BH&&b.g[cy][cx])return{b,cx,cy};}return null;}
+function erode(b,cx,cy){const hit=[[cx,cy],[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx-1,cy-1],[cx+1,cy-1]];for(const[dx,dy]of hit)if(dx>=0&&dx<BW&&dy>=0&&dy<BH)b.g[dy][dx]=0;}
+// ---- Ronda ----
+function resetRound(r){round=r;inv=[];const types=[{s:SQUID_A,b:SQUID_B,p:30},{s:CRAB_A,b:CRAB_B,p:20},{s:CRAB_A,b:CRAB_B,p:20},{s:OCTO_A,b:OCTO_B,p:10},{s:OCTO_A,b:OCTO_B,p:10}];for(let row=0;row<5;row++)for(let col=0;col<11;col++)inv.push({x:32+col*16,y:64+row*16,w:[8,11,11,12,12][row],t:types[row],alive:true});dir=1;stepT=0;pBul=null;iBuls=[];shootT=1.5;ufo.on=false;ufo.t=8+Math.random()*6;lives=3;player.x=W/2-6;makeBunkers();}
+function aliveCount(){let n=0;for(const i of inv)if(i.alive)n++;return n;}
+// ---- Entrada ----
+const keys={};
+addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='Space')e.preventDefault();if(e.code==='Enter'&&mode!=='play'){audio();if(mode==='title'||mode==='over'){resetRound(mode==='over'?round+1:1);score=0;mode='play';}}if(e.code==='KeyM')muted=!muted;if(e.code==='KeyP'&&mode==='play')paused=!paused;});
+addEventListener('keyup',e=>{keys[e.code]=false;});
+let paused=false;
+// ---- Lógica de actualización ----
+function gameOver(){lives=0;snd.over();if(score>hiScore){hiScore=score;localStorage.setItem('si_hi',hiScore);}mode='over';}
+function hitPlayer(){snd.boom();lives--;player.x=W/2-6;if(lives<=0)gameOver();else msgT=.8;}
+function update(dt){
+if(msgT>0){msgT-=dt;if(mode==='clear'&&msgT<=0){resetRound(round+1);mode='play';}return;}
+if(mode!=='play'||paused)return;
+// jugador
+const sp=95*dt;
+if(keys.ArrowLeft||keys.KeyA)player.x-=sp;
+if(keys.ArrowRight||keys.KeyD)player.x+=sp;
+player.x=Math.max(4,Math.min(W-17,player.x));
+if(keys.Space&&!pBul){pBul={x:player.x+6,y:238};snd.fire();}
+// paso de invasores
+const n=aliveCount();
+stepT+=dt;
+const interval=.03+.25*(n/55);
+if(stepT>=interval&&n>0){stepT=0;animF^=1;snd.step(stepN++);
+const atEdge=inv.some(i=>i.alive&&(dir>0?i.x+i.w+2>W-4:i.x-2<4));
+if(atEdge){dir*=-1;for(const i of inv)if(i.alive)i.y+=8;
+if(inv.some(i=>i.alive&&i.y+8>=player.y)){gameOver();return;}}
+else for(const i of inv)if(i.alive)i.x+=dir*2;}
+// bala del jugador
+if(pBul){pBul.y-=320*dt;
+const hitU=ufo.on&&pBul.x>ufo.x-1&&pBul.x< ufo.x+17&&pBul.y>4&&pBul.y<12;if(hitU){score+=ufo.pts;snd.boom();snd.ufoOff();ufo.on=false;pBul=null;msg='+'+ufo.pts;msgT=.8;}
+else{for(const i of inv)if(i.alive&&pBul.x>i.x-1&&pBul.x<i.x+i.w+1&&pBul.y>i.y-1&&pBul.y<i.y+9){i.alive=false;score+=i.t.p;snd.kill();pBul=null;if(aliveCount()===0){mode='clear';msgT=2;}break;}
+if(pBul){const bh=bunkerAt(pBul.x,pBul.y);if(bh){erode(bh.b,bh.cx,bh.cy);pBul=null;}}
+if(pBul&&pBul.y<10)pBul=null;}}
+// disparo de invasores
+shootT-=dt;
+if(shootT<=0&&iBuls.length<3){const cols={};for(const i of inv)if(i.alive)(cols[i.x]=cols[i.x]||[]).push(i);const cs=Object.keys(cols);if(cs.length){const c=cs[Math.floor(Math.random()*cs.length)];const list=cols[c].sort((a,b)=>b.y-a.y)[0];iBuls.push({x:list.x+list.w/2,y:list.y+8});}shootT=Math.max(.3,.5+Math.random()*.9-round*.04);}
+// balas de invasores
+for(let k=iBuls.length-1;k>=0;k--){const b=iBuls[k];b.y+=(75+round*12)*dt;
+const bh=bunkerAt(b.x,b.y);if(bh){erode(bh.b,bh.cx,bh.cy);iBuls.splice(k,1);continue;}
+if(b.x>player.x-1&&b.x<player.x+13&&b.y>player.y-1&&b.y<player.y+9){hitPlayer();iBuls.splice(k,1);}
+else if(b.y>H)iBuls.splice(k,1);}
+// UFO
+ufo.t-=dt;
+if(!ufo.on&&ufo.t<=0){ufo.on=true;ufo.dir=Math.random()<.5?1:-1;ufo.x=ufo.dir>0?-20:W;ufo.pts=[50,80,90,100][Math.floor(Math.random()*4)];snd.ufoOn();ufo.t=12+Math.random()*8;}
+if(ufo.on){ufo.x+=ufo.dir*60*dt;if(ufo.x<-24||ufo.x>W+4){ufo.on=false;snd.ufoOff();}}
+}
+// ---- Renderizado ----
+function txt(s,x,y,align='left'){ctx.fillStyle='#0f0';ctx.font='8px monospace';ctx.textAlign=align;ctx.fillText(s,x,y);ctx.textAlign='left';}
+function render(){
+ctx.clearRect(0,0,W,H);
+if(mode==='title'){txt('SPACE INVADERS',W/2,60,'center');
+ctx.drawImage(SQUID_A,56,72);ctx.drawImage(CRAB_A,54,88);ctx.drawImage(OCTO_A,52,104);
+txt('30 PTS',140,78);txt('20 PTS',140,94);txt('10 PTS',140,110);
+if(Math.floor(performance.now()/500)%2===0)txt('PRESS ENTER TO START',W/2,160,'center');
+txt('HI '+hiScore,W/2,20,'center');return;}
+// barra superior
+txt(String(score).padStart(5,'0'),8,10);
+txt('HIGH '+String(hiScore).padStart(5,'0'),W/2,10,'center');
+ctx.fillStyle='#0f0';ctx.fillRect(0,248,W,1);
+for(let i=0;i<Math.max(0,lives-1);i++)ctx.drawImage(CANNON,4+i*16,249);
+// blindajes
+for(const b of bunkers)for(let r=0;r<BH;r++)for(let c=0;c<BW;c++)if(b.g[r][c])ctx.fillRect(b.x+c*CELL,b.y+r*CELL,CELL,CELL);
+// invasores
+for(const i of inv)drawInv(i);
+// UFO
+if(ufo.on){ctx.fillStyle='#f00';ctx.drawImage(UFO,ufo.x|0,6);}
+// jugador y balas
+ctx.drawImage(CANNON,player.x|0,238);
+ctx.fillStyle='#fff';
+if(pBul)ctx.fillRect(pBul.x,pBul.y,2,7);
+for(const b of iBuls)ctx.fillRect(b.x,b.y,2,8);
+// mensajes
+if(mode==='over'){txt('GAME OVER',W/2,140,'center');txt('SCORE '+score,W/2,156,'center');txt('PRESS ENTER FOR NEXT ROUND',W/2,176,'center');}
+else if(mode==='clear')txt('ROUND CLEAR!',W/2,140,'center');
+if(msg&&msgT>0)txt(msg,W/2,130,'center');
+if(paused)txt('PAUSA',W/2,140,'center');
+}
+function drawInv(i){if(!i.alive)return;ctx.fillStyle='#0f0';ctx.drawImage(animF?i.t.b:i.t.s,i.x|0,i.y);}
+// ---- Bucle principal ----
+let last=performance.now();
+resetRound(1);score=0;mode='title';makeBunkers();
+function loop(t){const dt=Math.min(.05,(t-last)/1000);last=t;update(dt);render();requestAnimationFrame(loop);}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
